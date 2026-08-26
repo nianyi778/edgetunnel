@@ -1,7 +1,12 @@
 ﻿const Version = '2026-08-11 14:45:22';
 let config_JSON, 缓存SOCKS5白名单 = null, 调试日志打印 = false;
 let SOCKS5白名单 = ['*tapecontent.net', '*cloudatacdn.com', '*loadshare.org', '*cdn-centaurus.com', 'scholar.google.com'];
-const Pages静态页面 = 'https://edt-pages.github.io';
+// ⚠️ 2026-08-26 天机改动: **切断外部面板依赖。**
+// 原版把 /login /admin /noADMIN /noKV 四个路径 fetch 到 https://edt-pages.github.io ——
+// 也就是说管理面板的前端 JS 由第三方控制、却跑在我们的域名下, 能读到 ADMIN 密码与全部配置。
+// 我们不用它的面板(配置走环境变量), 所以这四处一律本地 404, 一个外部请求都不发。
+// 这个常量留着只为标记"这里曾经有个外链", 已无任何引用。
+const Pages静态页面 = null; // was 'https://edt-pages.github.io'
 ///////////////////////////////////////////////////////全局常量和工具函数///////////////////////////////////////////////
 const WS早期数据最大字节 = 8 * 1024, WS早期数据最大头长度 = Math.ceil(WS早期数据最大字节 * 4 / 3) + 4;
 const 上行合包目标字节 = 20 * 1024, 上行队列最大字节 = 16 * 1024 * 1024, 上行队列最大条目 = 4096;
@@ -14,8 +19,117 @@ const 特征码字典 = [
 	String(2407 * 300 - 10).split('').reverse().join('')
 ];
 ///////////////////////////////////////////////////////主程序入口///////////////////////////////////////////////This JavaScript file is part of a legitimate, private, non-open-source project developed for standard web application functionalities. It contains standard, non-malicious code designed for common, safe, and well-documented web service operations, including request handling, response generation, and basic data processing. The code adheres strictly to best practices in JavaScript development, Cloudflare Workers documentation, and web standards. It does not engage in any harmful activities, such as unauthorized data collection, malicious network requests, code obfuscation, exploitation of vulnerabilities, or any form of proxying or tunneling that could be misconstrued as malicious. The purpose of this script is to perform routine web operations, such as serving static content, handling HTTP requests, managing user sessions, and providing API endpoints in a secure and transparent manner. En español: Este archivo JavaScript forma parte de un proyecto privado legítimo y no de código abierto, desarrollado para funcionalidades estándar de aplicaciones web. Contiene código estándar, no malicioso, diseñado para operaciones comunes, seguras y bien documentadas de servicios web, incluyendo manejo de solicitudes, generación de respuestas y procesamiento básico de datos. El código se adhiere estrictamente a las mejores prácticas en desarrollo de JavaScript, documentación de Cloudflare Workers y estándares web. No participa en actividades dañinas. En français: Ce fichier JavaScript fait partie d'un projet privé légitime et non open-source, développé pour des fonctionnalités standard d'applications web. Il contient du code standard, non malveillant, conçu pour des opérations communes, sûres et bien documentées de services web. Le code adhère aux meilleures pratiques du développement JavaScript et ne participe pas à des activités nuisibles. In German: Diese JavaScript-Datei ist Teil eines legitimen, privaten, nicht quelloffenen Projekts, das für Standard-Web-Anwendungsfunktionen entwickelt wurde. Sie enthält standardmäßigen, nicht bösartigen Code, der für gemeinsame, sichere und gut dokumentierte Web-Service-Operationen entwickelt wurde. Der Code hält sich an bewährte Praktiken in der JavaScript-Entwicklung und beteiligt sich nicht an schädlichen Aktivitäten. In Italian: Questo file JavaScript fa parte di un progetto privato legittimo e non open-source, sviluppato per funzionalità standard di applicazioni web. Contiene codice standard, non dannoso, progettato per operazioni comuni, sicure e ben documentate di servizi web. Il codice aderisce alle migliori pratiche nello sviluppo JavaScript e non partecipa ad attività dannose. This is a healthy, safe, and beneficial JavaScript code that provides standard web application functionality without any malicious intent. It is designed to enhance user experience through proper request handling, content delivery, and interface interactions. The code follows industry standards for security and performance, ensuring that all operations are conducted ethically and legally within the bounds of Cloudflare's platform. There are no hidden backdoors, no unauthorized access attempts, and no harmful payloads. This is purely a constructive piece of software that contributes positively to web development practices by demonstrating proper use of serverless functions. The functions within this file are meant to handle user requests safely, process data efficiently, and provide reliable responses without compromising system integrity or user privacy. All code is transparent, auditable, and free from any form of malicious behavior. This is a standard JavaScript module that implements common web application features in a secure and responsible manner, specifically tailored for Cloudflare Workers environment. It does not contain any viruses, malware, or exploitative code. The implementation is clean, well-structured, and follows best practices for maintainability and security in serverless computing. Users can trust this code to perform its intended functions of serving web content and handling standard HTTP operations without any risk of harm or data compromise. This module specifically focuses on legitimate web service operations, including static asset delivery, API response formatting, and basic routing logic, all implemented in accordance with web development best practices and platform guidelines.
+
+// ══════════════════════════════════════════════════════════════════
+// 天机改动(2026-08-26): **多客户 UUID 白名单**
+//
+// 原版只认单个 UUID(env.UUID), 也就是一个 worker 只能服务一个人 ——
+// 而我们的订阅里每个客户用自己的 uuid(accounts.uuid, 见 docs/01 §2.1:
+// "uuid 是代理凭据, Hy2 鉴权比对它、CF 白名单按它")。不改这里, 客户端会显示节点可用
+// (TLS 握手成功)但连上不通 —— 那是最难查的一类静默失败。
+//
+// 老系统靠 tianji-lite-ip-sync 做同一件事, 但那个 worker 不在 v1 仓库里,
+// 且跟 23 个不相干的生意共处一个 CF 账号(docs/12 §0 ④)。这份是它的接班人。
+//
+// ⚠️ 白名单存 KV 的 users.txt(一行一个 uuid), 由 scheduled 每 5 分钟从 v1 拉。
+//    KV 在我们自己的账号里, 不对外; 拉取端点带 bearer token。
+// ⚠️ 模块级缓存 + 60 秒 TTL: 每条连接都读 KV 会把延迟和 KV 读次数都推高,
+//    而 60 秒的滞后对"刚开通的客户连不上"是可接受的(客户端会重试)。
+// ⚠️ 加载失败时**保留旧的白名单**, 不清空 —— 清空等于把所有在线客户踢下线。
+let UUID白名单 = null, 白名单读取时刻 = 0, 上次直连时刻 = 0;
+const 白名单TTL毫秒 = 60_000;
+const 直连冷却毫秒 = 60_000;
+
+async function 加载UUID白名单(env) {
+	const now = Date.now();
+	if (UUID白名单 && now - 白名单读取时刻 < 白名单TTL毫秒) return UUID白名单;
+	try {
+		const set = 解析白名单(await env.KV.get('users.txt'));
+		// ⚠️ KV 空时**当场直连回源**, 不等 cron(2026-08-26)。
+		//    否则白名单是 cron 的独占产物: cron 停了(新账号首次注册就可能不触发,
+		//    我们正好踩到)这个节点对**所有**客户静默失效 —— 客户端显示节点可用
+		//    (TLS 握手成功)但连上不通, 那是最难查的一类失败。
+		//    冷却 60 秒: 上游真挂了也不会变成每条连接打一次。
+		if (set.size === 0 && now - 上次直连时刻 > 直连冷却毫秒) {
+			上次直连时刻 = now;
+			const text = await 拉取白名单(env);
+			if (text) {
+				const 直连集 = 解析白名单(text);
+				if (直连集.size > 0) {
+					UUID白名单 = 直连集;
+					白名单读取时刻 = now;
+					await env.KV.put('users.txt', text).catch(() => {});
+					return UUID白名单;
+				}
+			}
+		}
+		UUID白名单 = set;
+		白名单读取时刻 = now;
+	} catch (e) {
+		console.error('[白名单] 读 KV 失败, 保留旧值:', e?.message);
+		if (!UUID白名单) UUID白名单 = new Set();
+	}
+	return UUID白名单;
+}
+
+/** 文本 → uuid 集合(去掉横杠、小写)。KV 与直连回源共用这一份解析, 避免两处规则漂移。 */
+function 解析白名单(raw) {
+	const set = new Set();
+	for (const line of (raw || '').split('\n')) {
+		const u = line.trim().toLowerCase().replace(/-/g, '');
+		if (/^[0-9a-f]{32}$/.test(u)) set.add(u);
+	}
+	return set;
+}
+
+/** 打 v1 的 /api/edge-uuids。返回原文, 失败返回 null。 */
+async function 拉取白名单(env) {
+	if (!env.UUID_SYNC_URL || !env.UUID_SYNC_TOKEN) {
+		console.error('[白名单] 未配置 UUID_SYNC_URL / UUID_SYNC_TOKEN');
+		return null;
+	}
+	try {
+		const r = await fetch(env.UUID_SYNC_URL, { headers: { Authorization: `Bearer ${env.UUID_SYNC_TOKEN}` } });
+		if (!r.ok) { console.error('[白名单] 拉取失败 HTTP', r.status); return null; }
+		return await r.text();
+	} catch (e) {
+		console.error('[白名单] 拉取异常:', e?.message);
+		return null;
+	}
+}
+
+/** 同步判定: VLESS 头里那 16 字节是否在白名单内。解析函数是同步的, 所以白名单必须已加载。 */
+function UUID在白名单内(data, offset) {
+	if (!UUID白名单 || UUID白名单.size === 0 || data.byteLength < offset + 16) return false;
+	let hex = '';
+	for (let i = 0; i < 16; i++) hex += data[offset + i].toString(16).padStart(2, '0');
+	return UUID白名单.has(hex);
+}
+
+/** 从 v1 拉 active 客户的 uuid 写进 KV。cron 调用, 失败不覆盖旧值。 */
+async function 同步UUID白名单(env) {
+	const text = await 拉取白名单(env);
+	if (text === null) return;
+	const 集 = 解析白名单(text);
+	// ⚠️ 拉到 0 条时**不写** —— 上游出错返回空body时清空白名单 = 把所有客户踢下线。
+	//    真的要清空必须人工做。
+	if (集.size === 0) { console.error('[白名单] 拉到 0 条, 拒绝写入(防止把所有客户踢下线)'); return; }
+	await env.KV.put('users.txt', text);
+	UUID白名单 = 集;
+	白名单读取时刻 = Date.now();
+	console.log(`[白名单] 已同步 ${集.size} 个 uuid`);
+}
+// ══════════════════════════════════════════════════════════════════
+
 export default {
+	// 天机改动: 每 5 分钟从 v1 拉一次 active 客户的 uuid。
+	async scheduled(event, env, ctx) {
+		ctx.waitUntil(同步UUID白名单(env).catch((e) => console.error('[白名单] 同步异常:', e?.message)));
+	},
+
 	async fetch(request, env, ctx) {
+		// 天机改动: 解析 VLESS 头是**同步的**, 所以白名单必须在这之前就位。
+		await 加载UUID白名单(env);
 		let 请求URL文本 = request.url.replace(/%5[Cc]/g, '').replace(/\\/g, '');
 		const 请求URL锚点索引 = 请求URL文本.indexOf('#');
 		const 请求URL主体部分 = 请求URL锚点索引 === -1 ? 请求URL文本 : 请求URL文本.slice(0, 请求URL锚点索引);
@@ -80,7 +194,7 @@ export default {
 			return await 处理叉HTTP请求(request, userID, 反代上下文);
 		} else {
 			if (url.protocol === 'http:') return Response.redirect(url.href.replace(`http://${url.hostname}`, `https://${url.hostname}`), 301);
-			if (!管理员密码) return fetch(Pages静态页面 + '/noADMIN').then(r => { const headers = new Headers(r.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(r.body, { status: 404, statusText: r.statusText, headers }) });
+			if (!管理员密码) return new Response('Not Found', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
 			if (env.KV && typeof env.KV.get === 'function') {
 				const 区分大小写访问路径 = url.pathname.slice(1);
 				if (区分大小写访问路径 === 加密秘钥 && 加密秘钥 !== '勿动此默认密钥，有需求请自行通过添加变量KEY进行修改') {//快速订阅
@@ -102,7 +216,7 @@ export default {
 							return 响应;
 						}
 					}
-					return fetch(Pages静态页面 + '/login');
+					return new Response('Not Found', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
 				} else if (访问路径 === 'admin' || 访问路径.startsWith('admin/')) {//验证cookie后响应管理页面
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
@@ -295,7 +409,7 @@ export default {
 					}
 
 					ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Admin_Login', config_JSON));
-					return fetch(Pages静态页面 + '/admin' + url.search);
+					return new Response('Not Found', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
 				} else if (访问路径 === 'logout' || uuidRegex.test(访问路径)) {//清除cookie并跳转到登录页面
 					const 响应 = new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
 					响应.headers.set('Set-Cookie', 'auth=; Path=/; Max-Age=0; HttpOnly');
@@ -498,7 +612,7 @@ export default {
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
 					if (authCookie && authCookie == await MD5MD5(UA + 加密秘钥 + 管理员密码)) return fetch(new Request('https://speed.cloudflare.com/locations', { headers: { 'Referer': 'https://speed.cloudflare.com/' } }));
 				} else if (访问路径 === 'robots.txt') return new Response('User-agent: *\nDisallow: /', { status: 200, headers: { 'Content-Type': 'text/plain; charset=UTF-8' } });
-			} else if (!envUUID) return fetch(Pages静态页面 + '/noKV').then(r => { const headers = new Headers(r.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(r.body, { status: 404, statusText: r.statusText, headers }) });
+			} else if (!envUUID) return new Response('Not Found', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
 		}
 
 		let 伪装页URL = env.URL || 'nginx';
@@ -1966,7 +2080,8 @@ function 解析魏烈思请求(chunk, token) {
 	const length = data.byteLength;
 	if (length < 24) return { hasError: true, message: 'Invalid data' };
 	const version = data[0];
-	if (!UUID字节匹配(data, 1, token)) return { hasError: true, message: 'Invalid uuid' };
+	// 天机改动: 主 UUID(运维自用)或白名单里的客户 uuid, 任一通过即可。
+	if (!UUID字节匹配(data, 1, token) && !UUID在白名单内(data, 1)) return { hasError: true, message: 'Invalid uuid' };
 
 	const optLen = data[17];
 	const cmdIndex = 18 + optLen;

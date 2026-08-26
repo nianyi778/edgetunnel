@@ -1,8 +1,34 @@
-name = "v20251104"
+# 天机 · CF 边缘备用出口(2026-08-26)
+#
+# ⚠️ 这个 worker 跑在**独立 CF 账号** Lizhouyang77@gmail.com's Account
+#    (d3c4c106…) 里, 与天机主站的 ad48867b… **完全分开**。
+#    理由: 拿 Workers 做通用代理是 CF 服务条款的灰色地带, 一旦被判违规是整个账号一起封,
+#    而主账号里有 Pages 主站、D1、KV 和老系统 panel —— 订阅地址是"永不改变"的对外承诺,
+#    断了补不回来。
+#
+# ⚠️ 面板已从代码里摘掉(方案二): 原版把 /login /admin 等四个路径 fetch 到
+#    第三方 edt-pages.github.io, 那段 JS 由别人控制却跑在我们域名下。配置全走环境变量。
+name = "tj-edge"
 main = "_worker.js"
-compatibility_date = "2025-11-04"
-keep_vars = true
+compatibility_date = "2026-08-01"
+compatibility_flags = ["nodejs_compat"]
+account_id = "d3c4c106ae25a1528d4a2fcebda61c0e"
+workers_dev = true
 
-#[[kv_namespaces]]
-#binding = "KV"			#KV绑定名默认不可修改
-#id = ""				#KV数据库id
+[[kv_namespaces]]
+binding = "KV"
+id = "0f35fda4665b43a1b36f544351540c7f"
+
+[vars]
+# ⚠️ 绝不开订阅转换: 原版的 SUBAPI 指向第三方服务器, 开了等于把客户的
+#    订阅地址(含 UUID)发给别人。天机的订阅一律由自己的 render-sub.ts 生成。
+SUBAPI = ""
+SUBCONFIG = ""
+
+# ⚠️ 每 5 分钟从 v1 拉一次 active 客户的 uuid 白名单(2026-08-26)。
+#    这是老系统 tianji-lite-ip-sync 的接班人 —— 那个 worker 不在 v1 仓库里,
+#    且与 23 个不相干的生意共处一个 CF 账号(docs/12 §0 ④)。
+#    5 分钟是折中: 新客户最多等 5 分钟能连上, 而吊销最多滞后 5 分钟。
+#    真要立刻生效, v1 侧应在开通/吊销时主动打一次同步(未做, 记在 docs/05)。
+[triggers]
+crons = ["*/5 * * * *"]
